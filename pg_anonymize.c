@@ -53,6 +53,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/plancat.h"
+#include "optimizer/planner.h"
 #include "parser/analyze.h"
 #include "rewrite/rewriteHandler.h"
 #include "tcop/utility.h"
@@ -151,13 +152,14 @@ static bool pgan_enabled = true;
 void		_PG_init(void);
 
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
-static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
+static planner_hook_type prev_planner_hook = NULL;
 
-static void pgan_post_parse_analyze(ParseState *pstate, Query *query
-#if PG_VERSION_NUM >= 140000
-									, JumbleState *jstate
+static PlannedStmt* pgan_planner(Query *parse,
+#if PG_VERSION_NUM >= 130000
+						const char *query_string,
 #endif
-									);
+						int cursorOptions, ParamListInfo boundParams);
+
 static void pgan_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 #if PG_VERSION_NUM >= 140000
 								bool readOnlyTree,
@@ -196,17 +198,6 @@ static void pgan_object_relabel(const ObjectAddress *object,
 void
 _PG_init(void)
 {
-	/*
-	 * This extension can modify the Query in post_parse_analyze_hook, but
-	 * doesn't have a way to adapt the raw query string accordingly.  This can
-	 * cause problem with some extensions like pg_stat_statements that rely on
-	 * both referring to the same thing.  To make sure that we don't cause
-	 * interference, we process other post_parse_analyze_hook first before our
-	 * own processing, but we have to make sure that we're the last module
-	 * loaded.  Unfortunately we can only check that when our code is loaded,
-	 * so we can only hope that no incompatible extension will be loaded
-	 * afterwards.
-	 */
 	if (process_shared_preload_libraries_in_progress)
 	{
 		pgan_check_preload_lib(shared_preload_libraries_string,
@@ -262,8 +253,8 @@ _PG_init(void)
 	MarkGUCPrefixReserved("pg_anonymize");
 
 	/* Install hooks. */
-	prev_post_parse_analyze_hook = post_parse_analyze_hook;
-	post_parse_analyze_hook = pgan_post_parse_analyze;
+        prev_planner_hook = planner_hook;
+        planner_hook = pgan_planner;
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = pgan_ProcessUtility;
 }
@@ -867,7 +858,7 @@ pgan_hack_rte(RangeTblEntry *rte)
 		raw = linitial_node(RawStmt, parselist);
 
 		/*
-		 * Be careful to not call our post_parse_analyze_hook when generating
+		 * Be careful to not call our planner_hook when generating
 		 * the new query.
 		 */
 		pgan_toplevel = false;
@@ -932,29 +923,37 @@ pgan_is_role_anonymized(void)
  * Walks the given query and replace any reference to an anonymized table with
  * a subquery generating the anonymized data and configured.
  */
-static void
-pgan_post_parse_analyze(ParseState *pstate, Query *query
-#if PG_VERSION_NUM >= 140000
-		, JumbleState *jstate
+static PlannedStmt*
+pgan_planner(Query *parse
+#if PG_VERSION_NUM >= 130000
+						,const char *query_string
 #endif
-		)
+						,int cursorOptions, ParamListInfo boundParams)
 {
+	PlannedStmt *stmt;
+
 	/* XXX - should we try to prevent write queries ? */
 
-	if (prev_post_parse_analyze_hook)
-		prev_post_parse_analyze_hook(pstate, query
-#if PG_VERSION_NUM >= 140000
-				, jstate
-#endif
-				);
-
 	/* Module disabled, recursive call or aborted transaction, bail out. */
-	if (!pgan_enabled || !pgan_toplevel || !IsTransactionState())
-		return;
-
 	/* Role isn't declared as anonymized, bail out. */
-	if (!pgan_is_role_anonymized())
-		return;
+	if (!pgan_enabled || !pgan_toplevel || !IsTransactionState()
+			|| !pgan_is_role_anonymized())
+	{
+		if (prev_planner_hook)
+			stmt = prev_planner_hook(parse
+#if PG_VERSION_NUM >= 130000
+					,query_string
+#endif
+					,cursorOptions, boundParams);
+		else
+			stmt = standard_planner(parse
+#if PG_VERSION_NUM >= 130000
+					,query_string
+#endif
+					,cursorOptions, boundParams);
+
+		return stmt;
+	}
 
 	/*
 	 * Walk the query and generate rewritten subqueries when needed.  We need
@@ -962,8 +961,24 @@ pgan_post_parse_analyze(ParseState *pstate, Query *query
 	 * for that new Query, other any module relying on the Query and the
 	 * query string to be consistent (like pg_stat_statements) would fail.
 	 */
-	pgan_hack_query((Node *) query, NULL);
+	pgan_hack_query((Node *) parse, NULL);
+
+	if (prev_planner_hook)
+		stmt = prev_planner_hook(parse
+#if PG_VERSION_NUM >= 130000
+				,query_string
+#endif
+				,cursorOptions, boundParams);
+	else
+		stmt = standard_planner(parse
+#if PG_VERSION_NUM >= 130000
+				,query_string
+#endif
+				,cursorOptions, boundParams);
+
+	return stmt;
 }
+
 
 /*
  * Intercept COPY TO commands to make sure anonymized data is emitted.

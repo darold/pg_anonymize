@@ -11,6 +11,8 @@ BEGIN
     RETURN 'hoho';
 END;
 $$ LANGUAGE plpgsql;
+-- Creating view on top of public.customer table 
+CREATE VIEW v1 AS SELECT * FROM public.customer;
 LOAD 'pg_anonymize';
 -- make sure our own user isn't masked
 SELECT current_user \gset
@@ -108,6 +110,13 @@ BEGIN
 END;
 $$ language plpgsql;
 NOTICE:  got C*****
+-- Verify that views also anonymize data
+SELECT * FROM public.v1;
+ id | first_name | last_name |  birthday  |  phone_number  
+----+------------+-----------+------------+----------------
+  1 | Nice       | C*****    | 01-01-1970 | +XXX XXXX XXXX
+(1 row)
+
 -- current role should see normal data when pg_anonymize isn't enabled
 SET pg_anonymize.enabled = 'off';
 SELECT * FROM public.customer;

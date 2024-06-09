@@ -13,6 +13,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Creating view on top of public.customer table 
+CREATE VIEW v1 AS SELECT * FROM public.customer;
+
 LOAD 'pg_anonymize';
 
 -- make sure our own user isn't masked
@@ -84,6 +87,9 @@ BEGIN
 	RAISE NOTICE 'got %', out_last_name;
 END;
 $$ language plpgsql;
+
+-- Verify that views also anonymize data
+SELECT * FROM public.v1;
 
 -- current role should see normal data when pg_anonymize isn't enabled
 SET pg_anonymize.enabled = 'off';
